@@ -1,8 +1,11 @@
-# main.py
+# main.py (Base64 JSON поддержка)
+# В архиве для Railway
+
 import os
 import re
 import asyncio
 import json
+import base64
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,40 +14,29 @@ from aiogram.types import Message
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# -------------------------
-# Config / Environment
-# -------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "ВАША_ТАБЛИЦА")
-SERVICE_JSON_STR = os.getenv("SERVICE_JSON")  # теперь ожидаем JSON как строку
+SERVICE_JSON_B64 = os.getenv("SERVICE_JSON_B64")
 
-# По умолчанию — та пара, что ты указывал:
 DEFAULT_TARGET_CHAT = -1002360529455
 DEFAULT_TARGET_THREAD = 3
-# Организация для этой пары:
 ORG_MAP = {
     (DEFAULT_TARGET_CHAT, DEFAULT_TARGET_THREAD): "333."
 }
 
-# Временная зона — Asia/Singapore
 TZ = ZoneInfo("Asia/Singapore")
 
-# -------------------------
-# Проверки окружения
-# -------------------------
 if not BOT_TOKEN:
     raise RuntimeError("Установи BOT_TOKEN в переменных окружения")
 
-if not SERVICE_JSON_STR:
-    raise RuntimeError("SERVICE_JSON не задана в переменных окружения")
+if not SERVICE_JSON_B64:
+    raise RuntimeError("SERVICE_JSON_B64 не задана")
 
-# -------------------------
-# Google Sheets init
-# -------------------------
 try:
-    service_info = json.loads(SERVICE_JSON_STR)
-except json.JSONDecodeError as e:
-    raise RuntimeError(f"Ошибка чтения SERVICE_JSON: {e}")
+    raw = base64.b64decode(SERVICE_JSON_B64)
+    service_info = json.loads(raw)
+except Exception as e:
+    raise RuntimeError(f"Ошибка декодирования SERVICE_JSON_B64: {e}")
 
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -53,11 +45,8 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_dict(service_info, scope)
 gc = gspread.authorize(creds)
 sh = gc.open(SPREADSHEET_NAME)
-worksheet = sh.sheet1  # используем первый лист
+worksheet = sh.sheet1
 
-# -------------------------
-# Заголовки (как в задаче)
-# -------------------------
 HEADER = [
     "время отметки",
     "дата отметки",
@@ -78,18 +67,14 @@ HEADER = [
     "габ"
 ]
 
-# Если заголовок отсутствует — создаём
 try:
     current_header = worksheet.row_values(1)
     if not current_header or [c.strip() for c in current_header] != HEADER:
         worksheet.delete_rows(1) if current_header else None
         worksheet.insert_row(HEADER, index=1)
 except Exception as e:
-    print("Warning: не удалось проверить/установить заголовок в таблице:", e)
+    print("Warning: не удалось проверить/установить заголовок:", e)
 
-# -------------------------
-# Логика триггеров
-# -------------------------
 TRIGGERS_PHRASES = {
     "+": "+",
     "мк": "+ мк",
@@ -113,6 +98,7 @@ def parse_right_of_plus(text: str) -> str:
     return text.split("+", 1)[1].strip()
 
 def extract_first_number(s: str) -> int:
+    import re
     m = re.search(r"\b(\d+)\b", s)
     return int(m.group(1)) if m else 0
 
@@ -128,9 +114,6 @@ def build_trigger_vector(right: str) -> dict:
                 vec[col] = 1
     return vec
 
-# -------------------------
-# Telegram bot
-# -------------------------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -143,12 +126,10 @@ async def handle_driver_message(message: Message):
     right = parse_right_of_plus(text)
     cash = extract_first_number(right)
     trigger_vec = build_trigger_vector(right)
-
     if "+" in TRIGGER_COLUMNS:
         trigger_vec["+"] = 1
 
     org = ORG_MAP.get((message.chat.id, message.message_thread_id), "")
-
     now = datetime.now(tz=TZ)
     time_str = now.strftime("%H:%M:%S")
     date_str = now.strftime("%Y-%m-%d")
@@ -171,9 +152,6 @@ async def handle_driver_message(message: Message):
     except Exception:
         pass
 
-# -------------------------
-# Запуск
-# -------------------------
 if __name__ == "__main__":
     print("Starting bot...")
     try:
