@@ -1,8 +1,4 @@
-# main.py (Base64 JSON поддержка)
-# В архиве для Railway
-
 import os
-import re
 import asyncio
 import json
 import base64
@@ -11,41 +7,59 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
+
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+
+# ================== ENV ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "ВАША_ТАБЛИЦА")
+SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME")
 SERVICE_JSON_B64 = os.getenv("SERVICE_JSON_B64")
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан")
+
+if not SPREADSHEET_NAME:
+    raise RuntimeError("SPREADSHEET_NAME не задан")
+
+if not SERVICE_JSON_B64:
+    raise RuntimeError("SERVICE_JSON_B64 не задан")
+
+# ================== GOOGLE CREDS ==================
+
+try:
+    raw_json = base64.b64decode(SERVICE_JSON_B64).decode("utf-8")
+    service_info = json.loads(raw_json)
+except Exception as e:
+    raise RuntimeError(f"Ошибка чтения SERVICE_JSON_B64: {e}")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+creds = Credentials.from_service_account_info(
+    service_info,
+    scopes=SCOPES
+)
+
+gc = gspread.authorize(creds)
+sh = gc.open(SPREADSHEET_NAME)
+worksheet = sh.sheet1
+
+# ================== BOT CONFIG ==================
 
 DEFAULT_TARGET_CHAT = -1002360529455
 DEFAULT_TARGET_THREAD = 3
+
 ORG_MAP = {
     (DEFAULT_TARGET_CHAT, DEFAULT_TARGET_THREAD): "333."
 }
 
 TZ = ZoneInfo("Europe/Minsk")
 
-if not BOT_TOKEN:
-    raise RuntimeError("Установи BOT_TOKEN в переменных окружения")
-
-if not SERVICE_JSON_B64:
-    raise RuntimeError("SERVICE_JSON_B64 не задана")
-
-try:
-    raw = base64.b64decode(SERVICE_JSON_B64)
-    service_info = json.loads(raw)
-except Exception as e:
-    raise RuntimeError(f"Ошибка декодирования SERVICE_JSON_B64: {e}")
-
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(service_info, scope)
-gc = gspread.authorize(creds)
-sh = gc.open(SPREADSHEET_NAME)
-worksheet = sh.sheet1
+# ================== SHEET HEADER ==================
 
 HEADER = [
     "время отметки",
@@ -67,17 +81,9 @@ HEADER = [
     "габ"
 ]
 
-try:
-    current_header = worksheet.row_values(1)
-    if not current_header or [c.strip() for c in current_header] != HEADER:
-        worksheet.delete_rows(1) if current_header else None
-        worksheet.insert_row(HEADER, index=1)
-except Exception as e:
-    print("Warning: не удалось проверить/установить заголовок:", e)
+TRIGGER_COLUMNS = HEADER[5:]
 
-TRIGGERS_PHRASES = {
-    "+": "+",
-    "мк": "+ мк",
+TRIGGERS = {
     "мк синяя": "+ мк синяя",
     "мк красная": "+ мк красная",
     "мк оранжевая": "+ мк оранжевая",
@@ -87,74 +93,65 @@ TRIGGERS_PHRASES = {
     "мк розовая": "+ мк розовая",
     "мк темно-серая": "+ мк темно-серая",
     "мк голубая": "+ мк голубая",
+    "мк": "+ мк",
     "габ": "габ"
 }
 
-TRIGGER_COLUMNS = HEADER[5:]
+# ================== UTILS ==================
 
-def parse_right_of_plus(text: str) -> str:
-    if "+" not in text:
-        return ""
-    return text.split("+", 1)[1].strip()
-
-def extract_first_number(s: str) -> int:
+def extract_first_number(text: str) -> int:
     import re
-    m = re.search(r"\b(\d+)\b", s)
+    m = re.search(r"\b(\d+)\b", text)
     return int(m.group(1)) if m else 0
 
-def build_trigger_vector(right: str) -> dict:
-    r = right.lower()
+
+def build_trigger_vector(text: str) -> dict:
+    t = text.lower()
     vec = {col: 0 for col in TRIGGER_COLUMNS}
-    for key in sorted(TRIGGERS_PHRASES.keys(), key=lambda x: -len(x)):
-        col = TRIGGERS_PHRASES[key]
-        if key == "+":
-            continue
-        if key in r:
-            if col in vec:
-                vec[col] = 1
+
+    for key, col in TRIGGERS.items():
+        if key in t and col in vec:
+            vec[col] = 1
+
+    vec["+"] = 1
     return vec
+
+
+# ================== BOT ==================
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-@dp.message(F.chat.id == DEFAULT_TARGET_CHAT, F.message_thread_id == DEFAULT_TARGET_THREAD)
-async def handle_driver_message(message: Message):
+@dp.message(
+    F.chat.id == DEFAULT_TARGET_CHAT,
+    F.message_thread_id == DEFAULT_TARGET_THREAD
+)
+async def handle_message(message: Message):
     text = (message.text or "").lower()
-    if not text or "+" not in text:
+    if "+" not in text:
         return
 
-    right = parse_right_of_plus(text)
-    cash = extract_first_number(right)
-    trigger_vec = build_trigger_vector(right)
-    if "+" in TRIGGER_COLUMNS:
-        trigger_vec["+"] = 1
+    cash = extract_first_number(text)
+    triggers = build_trigger_vector(text)
 
-    org = ORG_MAP.get((message.chat.id, message.message_thread_id), "")
     now = datetime.now(tz=TZ)
-    time_str = now.strftime("%H:%M:%S")
-    date_str = now.strftime("%Y-%m-%d")
 
     row = [
-        time_str,
-        date_str,
+        now.strftime("%H:%M:%S"),
+        now.strftime("%Y-%m-%d"),
         str(message.from_user.id),
-        org,
+        ORG_MAP.get((message.chat.id, message.message_thread_id), ""),
         str(cash),
-    ] + [str(trigger_vec.get(col, 0)) for col in TRIGGER_COLUMNS]
+    ] + [str(triggers[col]) for col in TRIGGER_COLUMNS]
 
     try:
         worksheet.append_row(row, value_input_option="USER_ENTERED")
-    except Exception as e:
-        print("Error appending row to Google Sheet:", e)
-
-    try:
         await message.reply("Отметка принята ✅")
-    except Exception:
-        pass
+    except Exception as e:
+        print("Ошибка записи в Google Sheets:", e)
+
+# ================== START ==================
 
 if __name__ == "__main__":
-    print("Starting bot...")
-    try:
-        asyncio.run(dp.start_polling(bot))
-    except KeyboardInterrupt:
-        print("Stopped by user")
+    print("Bot started")
+    asyncio.run(dp.start_polling(bot))
