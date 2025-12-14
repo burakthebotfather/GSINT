@@ -24,7 +24,7 @@ ORG_MAP = {
     (DEFAULT_TARGET_CHAT, DEFAULT_TARGET_THREAD): "333."
 }
 
-TZ = ZoneInfo("Asia/Singapore")
+TZ = ZoneInfo("Europe/Minsk")
 
 if not BOT_TOKEN:
     raise RuntimeError("Установи BOT_TOKEN в переменных окружения")
