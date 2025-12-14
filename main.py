@@ -44,6 +44,9 @@ creds = Credentials.from_service_account_info(
     scopes=SCOPES
 )
 
+print("Client email:", service_info["client_email"])
+print("Private key starts with:", service_info["private_key"][:30])
+
 gc = gspread.authorize(creds)
 sh = gc.open(SPREADSHEET_NAME)
 worksheet = sh.sheet1
