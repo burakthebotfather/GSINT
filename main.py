@@ -1,160 +1,162 @@
 import os
+import re
 import asyncio
-import json
-import base64
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
+from aiogram.enums import ParseMode
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ================== ENV ==================
+# ================== НАСТРОЙКИ ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME")
-SERVICE_JSON_B64 = os.getenv("SERVICE_JSON_B64")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан")
+TARGET_CHAT_ID = -1002360529455
+TARGET_THREAD_ID = 3
+ORGANIZATION = "333."
 
-if not SPREADSHEET_NAME:
-    raise RuntimeError("SPREADSHEET_NAME не задан")
+SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME")  # имя таблицы
+SHEET_NAME = os.getenv("SHEET_NAME", "Лист1")
 
-if not SERVICE_JSON_B64:
-    raise RuntimeError("SERVICE_JSON_B64 не задан")
-
-# ================== GOOGLE CREDS ==================
-
-try:
-    raw_json = base64.b64decode(SERVICE_JSON_B64).decode("utf-8")
-    service_info = json.loads(raw_json)
-except Exception as e:
-    raise RuntimeError(f"Ошибка чтения SERVICE_JSON_B64: {e}")
+# ================== GOOGLE SHEETS ==================
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/drive",
 ]
 
 creds = Credentials.from_service_account_info(
-    service_info,
-    scopes=SCOPES
+    {
+        "type": "service_account",
+        "project_id": os.getenv("GS_PROJECT_ID"),
+        "private_key_id": os.getenv("GS_PRIVATE_KEY_ID"),
+        "private_key": os.getenv("GS_PRIVATE_KEY").replace("\\n", "\n"),
+        "client_email": os.getenv("GS_CLIENT_EMAIL"),
+        "client_id": os.getenv("GS_CLIENT_ID"),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": os.getenv("GS_CLIENT_CERT_URL"),
+    },
+    scopes=SCOPES,
 )
-
-print("Client email:", service_info["client_email"])
-print("Private key starts with:", service_info["private_key"][:30])
 
 gc = gspread.authorize(creds)
 sh = gc.open(SPREADSHEET_NAME)
-worksheet = sh.sheet1
+worksheet = sh.worksheet(SHEET_NAME)
 
-# ================== BOT CONFIG ==================
+# ================== ТРИГГЕРЫ ==================
 
-DEFAULT_TARGET_CHAT = -1002360529455
-DEFAULT_TARGET_THREAD = 3
-
-ORG_MAP = {
-    (DEFAULT_TARGET_CHAT, DEFAULT_TARGET_THREAD): "333."
-}
-
-TZ = ZoneInfo("Europe/Minsk")
-
-# ================== SHEET HEADER ==================
-
-HEADER = [
-    "время отметки",
-    "дата отметки",
-    "ID водителя",
-    "организация",
-    "наличные",
-    "+",
-    "+ мк",
-    "+ мк синяя",
-    "+ мк красная",
-    "+ мк оранжевая",
-    "+ мк салатовая",
-    "+ мк коричневая",
-    "+ мк светло-серая",
-    "+ мк розовая",
-    "+ мк темно-серая",
-    "+ мк голубая",
-    "габ"
+COLUMNS = [
+    '"+""',
+    '"+ мк"',
+    '"+ мк синяя"',
+    '"+ мк красная"',
+    '"+ мк оранжевая"',
+    '"+ мк салатовая"',
+    '"+ мк коричневая"',
+    '"+ мк светло-серая"',
+    '"+ мк розовая"',
+    '"+ мк темно-серая"',
+    '"+ мк голубая"',
+    "габ",
 ]
 
-TRIGGER_COLUMNS = HEADER[5:]
+MK_COLORS = [
+    "синяя",
+    "красная",
+    "оранжевая",
+    "салатовая",
+    "коричневая",
+    "светло-серая",
+    "розовая",
+    "темно-серая",
+    "голубая",
+]
 
-TRIGGERS = {
-    "мк синяя": "+ мк синяя",
-    "мк красная": "+ мк красная",
-    "мк оранжевая": "+ мк оранжевая",
-    "мк салатовая": "+ мк салатовая",
-    "мк коричневая": "+ мк коричневая",
-    "мк светло-серая": "+ мк светло-серая",
-    "мк розовая": "+ мк розовая",
-    "мк темно-серая": "+ мк темно-серая",
-    "мк голубая": "+ мк голубая",
-    "мк": "+ мк",
-    "габ": "габ"
-}
+# ================== ПАРСИНГ ==================
 
-# ================== UTILS ==================
+def parse_message(text: str):
+    text = text.lower()
 
-def extract_first_number(text: str) -> int:
-    import re
-    m = re.search(r"\b(\d+)\b", text)
-    return int(m.group(1)) if m else 0
-
-
-def build_trigger_vector(text: str) -> dict:
-    t = text.lower()
-    vec = {col: 0 for col in TRIGGER_COLUMNS}
-
-    for key, col in TRIGGERS.items():
-        if key in t and col in vec:
-            vec[col] = 1
-
-    vec["+"] = 1
-    return vec
-
-
-# ================== BOT ==================
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(
-    F.chat.id == DEFAULT_TARGET_CHAT,
-    F.message_thread_id == DEFAULT_TARGET_THREAD
-)
-async def handle_message(message: Message):
-    text = (message.text or "").lower()
     if "+" not in text:
-        return
+        return None
 
-    cash = extract_first_number(text)
-    triggers = build_trigger_vector(text)
+    right = text.split("+", 1)[1].strip()
 
-    now = datetime.now(tz=TZ)
+    # Наличные
+    cash = 0
+    cash_match = re.search(r"\b\d+\b", right)
+    if cash_match:
+        cash = int(cash_match.group())
+
+    flags = {col: 0 for col in COLUMNS}
+
+    # "+" всегда если дошли сюда
+    flags['"+"'] = 1
+
+    if "мк" in right:
+        flags['"+ мк"'] = 1
+
+    for color in MK_COLORS:
+        if f"мк {color}" in right:
+            flags[f'"+ мк {color}"'] = 1
+
+    if "габ" in right:
+        flags["габ"] = 1
+
+    return cash, flags
+
+# ================== GOOGLE SHEETS ==================
+
+def append_row(user_id: int, cash: int, flags: dict):
+    now = datetime.now()
 
     row = [
         now.strftime("%H:%M:%S"),
-        now.strftime("%Y-%m-%d"),
-        str(message.from_user.id),
-        ORG_MAP.get((message.chat.id, message.message_thread_id), ""),
-        str(cash),
-    ] + [str(triggers[col]) for col in TRIGGER_COLUMNS]
+        now.strftime("%d.%m.%Y"),
+        user_id,
+        ORGANIZATION,
+        cash,
+    ]
 
-    try:
-        worksheet.append_row(row, value_input_option="USER_ENTERED")
-        await message.reply("Отметка принята ✅")
-    except Exception as e:
-        print("Ошибка записи в Google Sheets:", e)
+    for col in COLUMNS:
+        row.append(flags[col])
+
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+# ================== BOT ==================
+
+bot = Bot(BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
+
+@dp.message(F.text)
+async def handle_message(message: Message):
+    if message.chat.id != TARGET_CHAT_ID:
+        return
+
+    if message.message_thread_id != TARGET_THREAD_ID:
+        return
+
+    parsed = parse_message(message.text)
+    if not parsed:
+        return
+
+    cash, flags = parsed
+
+    append_row(
+        user_id=message.from_user.id,
+        cash=cash,
+        flags=flags,
+    )
 
 # ================== START ==================
 
+async def main():
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    print("Bot started")
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(main())
